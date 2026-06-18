@@ -1,0 +1,20 @@
+# Never commit OpenAI's proprietary app code or any large binaries.
+# The script downloads/extracts these locally at build time — they are not
+# part of this repo.
+Codex.dmg
+*.dmg
+Codex_Intel.app/
+Codex_Intel.app.*/
+resources/
+electron-*.zip
+temp_build/
+native_build_temp/
+native_test_prebuilt/node_modules/
+package.json          # extracted from app.asar at build time; not source
+_app_pkg.json
+
+# Node
+node_modules/
+
+# macOS
+.DS_Store
