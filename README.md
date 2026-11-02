@@ -10,10 +10,12 @@ npm CLI.
 
 It runs entirely on your machine on a copy of the app **you** download. It
 **does not contain or redistribute any OpenAI code** — the script extracts the
-app logic from your own `Codex.dmg` at build time.
+app logic from your own official `Codex.dmg` at build time. It accepts both the
+new `ChatGPT.app` bundle and the older `Codex.app` bundle.
 
 > ⚠️ **Unofficial.** Not affiliated with, supported by, or endorsed by OpenAI.
-> Auto-updates won't work (it's a manual port). Use at your own risk.
+> The Intel bundle is unsigned and locally rebuilt. OpenAI ships the source app
+> for Apple Silicon; this project rebuilds it for Intel on your Mac.
 
 ---
 
@@ -21,17 +23,19 @@ app logic from your own `Codex.dmg` at build time.
 
 `rebuild_codex.js`:
 
-1. Mounts your `Codex.dmg` and extracts the app logic (`app.asar`), icon, and
-   `Info.plist`.
-2. Reads the Electron version the app targets, and downloads the matching
-   **darwin-x64** Electron release from the official Electron GitHub releases.
+1. Mounts your official DMG and extracts the app logic (`app.asar`), icon, and
+   source metadata.
+2. Downloads the **darwin-x64** Electron runtime from official Electron GitHub
+   releases. The rebuilt bundle keeps Electron's launcher metadata and uses the
+   source app's version and identifier.
 3. Rebuilds the native modules (`better-sqlite3`, `node-pty`) for Electron x64,
    preferring prebuilt binaries and falling back to a C++20 source build.
 4. Copies the **x64 `codex`** (and `rg`/ripgrep) binary out of your global
    `@openai/codex` install.
 5. Wraps the launcher so the app starts with `--no-sandbox` and a PATH that can
    see your nvm/Homebrew/pnpm globals.
-6. Produces `Codex_Intel.app`.
+6. Copies the x64 `codex-code-mode-host` when available and produces
+   `Codex_Intel.app`.
 
 ## Requirements
 
@@ -43,7 +47,7 @@ app logic from your own `Codex.dmg` at build time.
   ```bash
   npm install -g @openai/codex
   ```
-- The official **`Codex.dmg`** (arm64 installer) from OpenAI, placed in this
+- The official **`Codex.dmg`** (Apple Silicon installer) from OpenAI, placed in this
   folder. Download it from OpenAI's official distribution.
 
 ## Build
@@ -76,11 +80,24 @@ xattr -cr Codex_Intel.app
 
 ## Updating
 
-It's a manual port, so:
+The optional local updater checks OpenAI's appcast at login and every 24 hours,
+and updates the global Codex CLI from npm. If the app or bundled CLI is out of
+date, it downloads the official DMG, verifies the disk image, rebuilds the Intel
+app locally, and replaces the installed copy. If Codex is open, it defers the
+app replacement until the next check. Install it with:
 
-1. Download the new `Codex.dmg` from OpenAI and replace the old one here.
-2. If the CLI also updated: `npm update -g @openai/codex`.
-3. Rebuild clean: `node rebuild_codex.js --clean`.
+```bash
+bash scripts/install-auto-updater.sh
+```
+
+Updater output is written to `~/Library/Logs/codex-intel-updater.log`. Remove
+`~/Library/LaunchAgents/com.szpili.codex-intel-updater.plist` and boot it out
+with `launchctl bootout gui/$(id -u) ~/Library/LaunchAgents/com.szpili.codex-intel-updater.plist`
+to disable automatic updates.
+
+To rebuild manually, replace `Codex.dmg` with the new official installer and run
+`node rebuild_codex.js --clean`. The installed app is kept until you move the
+newly built app into `~/Applications`.
 
 ## Security note (`--no-sandbox`)
 
@@ -103,10 +120,11 @@ network_access = true
   CLT (`xcode-select --install`); the script forces `-std=c++20` for Electron 40.
 - **"Could not find local x64 Codex binary"** — ensure `@openai/codex` is
   installed globally; check `npm list -g @openai/codex`.
-- **Blank window** — executable name vs `Info.plist` mismatch; the wrapper at
-  `Contents/MacOS/Codex` (launching `Codex.orig`) handles this by default.
-- **`sparkle.node` (auto-updater) crash** — ignore it; the app still works (no
-  auto-updates on this port anyway).
+- **App aborts during launch** — the rebuilder keeps Electron's
+  `NSPrincipalClass` (`AtomApplication`). The source app's custom
+  `BrowserCrApplication` class is not present in stock Electron.
+- **Code Mode unavailable** — update the global Codex CLI and rebuild so the
+  x64 `codex-code-mode-host` is copied alongside the CLI binary.
 
 ## License
 
@@ -129,11 +147,10 @@ odpala się w ogóle. To repo to jeden skrypt, który składa apkę na nowo wok�
 
 Działa **w całości lokalnie**, na kopii apki, którą pobierasz **sam**. **Nie
 zawiera ani nie rozpowszechnia kodu OpenAI** — skrypt wyciąga logikę aplikacji z
-Twojego własnego `Codex.dmg` w trakcie budowania.
+oficjalnego `Codex.dmg`. Obsługuje nowe `ChatGPT.app` i starsze `Codex.app`.
 
-> ⚠️ **Nieoficjalne.** Brak powiązania z OpenAI, bez ich wsparcia.
-> Auto-aktualizacje nie działają (to ręczny port). Używasz na własną
-> odpowiedzialność.
+> ⚠️ **Nieoficjalne.** Brak powiązania z OpenAI, bez ich wsparcia. Wersja Intel
+> jest składana lokalnie i nie jest podpisana przez OpenAI.
 
 ## Wymagania
 
@@ -157,8 +174,20 @@ Jeśli macOS twierdzi, że apka jest „uszkodzona": `xattr -cr Codex_Intel.app`
 
 ## Aktualizacja
 
-Ręczny port: podmień `Codex.dmg`, ewentualnie `npm update -g @openai/codex`,
-potem `node rebuild_codex.js --clean`.
+Opcjonalny updater sprawdza appcast OpenAI przy logowaniu i co 24 godziny. Gdy
+pojawi się nowa wersja, pobiera oficjalny DMG, weryfikuje obraz, lokalnie buduje
+wersję Intel i podmienia zainstalowaną apkę. Aktualizuje też globalny Codex CLI
+przez npm.
+
+```bash
+bash scripts/install-auto-updater.sh
+```
+
+Jeśli Codex jest uruchomiony, podmiana apki poczeka do kolejnego sprawdzenia.
+Log znajduje się w
+`~/Library/Logs/codex-intel-updater.log`. Aby wyłączyć updater, usuń
+`~/Library/LaunchAgents/com.szpili.codex-intel-updater.plist` i wykonaj
+`launchctl bootout gui/$(id -u) ~/Library/LaunchAgents/com.szpili.codex-intel-updater.plist`.
 
 ## Licencja
 

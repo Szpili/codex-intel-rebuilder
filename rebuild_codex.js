@@ -1,12 +1,12 @@
 const fs = require('fs');
 const path = require('path');
-const { execSync } = require('child_process');
+const { execSync, execFileSync } = require('child_process');
 const os = require('os');
 
 // Configuration
 const REPO_ROOT = __dirname;
 const MOUNT_POINT = '/Volumes/CodexMount';
-const DMG_PATH = path.join(REPO_ROOT, 'Codex.dmg');
+const DMG_PATH = process.env.CODEX_DMG_PATH || path.join(REPO_ROOT, 'Codex.dmg');
 const TEMP_DIR = path.join(REPO_ROOT, 'temp_build');
 const FINAL_APP_PATH = path.join(REPO_ROOT, 'Codex_Intel.app');
 const RESOURCES_DIR = path.join(REPO_ROOT, 'resources');
@@ -81,24 +81,30 @@ async function main() {
     if (missingResources.length > 0) {
         console.log(`Missing resources (${missingResources.join(', ')}). Mounting DMG...`);
 
-        let mounted = false;
-        if (!fs.existsSync(MOUNT_POINT)) {
-            // Check if already mounted by user?
+        let mountedByScript = false;
+        const mountIsActive = execSync('mount', { encoding: 'utf8' })
+            .split('\n')
+            .some((line) => line.includes(` on ${MOUNT_POINT} (`));
+        if (!mountIsActive) {
+            fs.mkdirSync(MOUNT_POINT, { recursive: true });
             try {
-                // Try to mount
                 run(`hdiutil attach "${DMG_PATH}" -nobrowse -mountpoint "${MOUNT_POINT}"`);
-                mounted = true;
+                mountedByScript = true;
             } catch (e) {
-                console.log("Mount failed or already mounted. Checking...");
+                console.log("Mount failed. Checking the existing mount point...");
             }
         } else {
-            console.log("Mount point exists, assuming mounted.");
-            mounted = true;
-            // If strictly it's just a folder, we might fail, but let's assume valid mount or previous run leftover
+            console.log("Disk image is already mounted at the rebuild mount point.");
         }
 
         try {
-            const appPath = path.join(MOUNT_POINT, 'Codex.app/Contents');
+            const appBundleName = ['ChatGPT.app', 'Codex.app'].find((name) =>
+                fs.existsSync(path.join(MOUNT_POINT, name, 'Contents/Resources/app.asar'))
+            );
+            if (!appBundleName) {
+                throw new Error('Could not find ChatGPT.app or Codex.app with Contents/Resources/app.asar in DMG');
+            }
+            const appPath = path.join(MOUNT_POINT, appBundleName, 'Contents');
             const resPath = path.join(appPath, 'Resources');
 
             if (fs.existsSync(path.join(resPath, 'app.asar'))) {
@@ -108,10 +114,13 @@ async function main() {
                     run(`cp "${path.join(resPath, 'app.asar')}" "${path.join(RESOURCES_DIR, 'app.asar')}"`);
                 }
 
-                // Copy electron.icns
+                // Current ChatGPT bundles use app.icns; older Codex bundles use electron.icns.
                 if (!fs.existsSync(path.join(RESOURCES_DIR, 'electron.icns'))) {
-                    console.log("Extracting electron.icns...");
-                    run(`cp "${path.join(resPath, 'electron.icns')}" "${path.join(RESOURCES_DIR, 'electron.icns')}"`);
+                    const iconName = ['app.icns', 'electron.icns'].find((name) => fs.existsSync(path.join(resPath, name)));
+                    if (iconName) {
+                        console.log(`Extracting ${iconName} as electron.icns...`);
+                        fs.copyFileSync(path.join(resPath, iconName), path.join(RESOURCES_DIR, 'electron.icns'));
+                    }
                 }
 
                 // Copy Info.plist
@@ -130,10 +139,10 @@ async function main() {
                     }
                 }
             } else {
-                throw new Error("Could not find Codex.app/Contents/Resources/app.asar in DMG");
+                throw new Error(`Could not find app.asar in ${appBundleName || 'ChatGPT.app or Codex.app'}`);
             }
         } finally {
-            if (mounted) {
+            if (mountedByScript) {
                 // Try to detach, don't fail if busy
                 try {
                     run(`hdiutil detach "${MOUNT_POINT}"`);
@@ -158,7 +167,7 @@ async function main() {
     }
 
     const pkg = JSON.parse(fs.readFileSync(pkgJsonPath, 'utf8'));
-    let electronVersion = pkg.devDependencies?.electron || pkg.dependencies?.electron;
+    let electronVersion = process.env.ELECTRON_VERSION || pkg.devDependencies?.electron || pkg.dependencies?.electron;
 
     if (!electronVersion) {
         console.log("Could not find electron version, defaulting to 40.0.0 based on previous analysis.");
@@ -239,12 +248,18 @@ async function main() {
     }
     fs.mkdirSync(tempBuildDir);
 
+    const nativeDependencies = Object.fromEntries(
+        ['better-sqlite3', 'node-pty']
+            .filter((name) => pkg.dependencies?.[name])
+            .map((name) => [name, pkg.dependencies[name]])
+    );
+    if (Object.keys(nativeDependencies).length === 0) {
+        console.error('Could not find the expected native module versions in the extracted app package.json.');
+        process.exit(1);
+    }
     const nativePkg = {
         "name": "temp-build",
-        "dependencies": {
-            "better-sqlite3": pkg.dependencies['better-sqlite3'],
-            "node-pty": pkg.dependencies['node-pty']
-        }
+        "dependencies": nativeDependencies
     };
     fs.writeFileSync(path.join(tempBuildDir, 'package.json'), JSON.stringify(nativePkg, null, 2));
 
@@ -326,6 +341,32 @@ async function main() {
 
     if (fs.existsSync(localInfoPlist)) {
         fs.copyFileSync(localInfoPlist, infoPlistDest);
+        // Preserve the source app's signed-build metadata and URL handlers, but
+        // use Electron's own principal class. BrowserCrApplication belongs to
+        // OpenAI's custom framework, which is not included in this Intel port.
+        const setPlistValue = (plistPath, key, value) => {
+            try {
+                execFileSync('/usr/libexec/PlistBuddy', ['-c', `Set :${key} ${value}`, plistPath]);
+            } catch {
+                execFileSync('/usr/libexec/PlistBuddy', ['-c', `Add :${key} string ${value}`, plistPath]);
+            }
+        };
+        const sourcePlistValue = (key) => execFileSync(
+            '/usr/libexec/PlistBuddy', ['-c', `Print :${key}`, localInfoPlist], { encoding: 'utf8' }
+        ).trim();
+        setPlistValue(infoPlistDest, 'CFBundleExecutable', 'Codex');
+        setPlistValue(infoPlistDest, 'CFBundleIdentifier', sourcePlistValue('CFBundleIdentifier'));
+        setPlistValue(infoPlistDest, 'CFBundleShortVersionString', sourcePlistValue('CFBundleShortVersionString'));
+        setPlistValue(infoPlistDest, 'CFBundleVersion', sourcePlistValue('CFBundleVersion'));
+        setPlistValue(infoPlistDest, 'CFBundleName', 'Codex');
+        setPlistValue(infoPlistDest, 'CFBundleDisplayName', 'Codex');
+        setPlistValue(infoPlistDest, 'CFBundleIconFile', 'electron.icns');
+        setPlistValue(infoPlistDest, 'NSPrincipalClass', 'AtomApplication');
+        try {
+            setPlistValue(infoPlistDest, 'LSMinimumSystemVersion', sourcePlistValue('LSMinimumSystemVersion'));
+        } catch {
+            // Keep Electron's minimum if the source doesn't declare one.
+        }
     }
 
     const macOsDir = path.join(targetApp, 'Contents/MacOS');
@@ -377,6 +418,13 @@ exec "$DIR/Codex.orig" --no-sandbox "$@"
         console.log(`Copying ${sourceCodexBin} to ${targetCodexBin}`);
         fs.copyFileSync(sourceCodexBin, targetCodexBin);
         fs.chmodSync(targetCodexBin, '755');
+
+        const codeModeHost = path.join(path.dirname(sourceCodexBin), 'codex-code-mode-host');
+        if (fs.existsSync(codeModeHost)) {
+            const targetCodeModeHost = path.join(targetResources, 'codex-code-mode-host');
+            fs.copyFileSync(codeModeHost, targetCodeModeHost);
+            fs.chmodSync(targetCodeModeHost, '755');
+        }
 
         const binDir = path.join(targetResources, 'bin');
         if (!fs.existsSync(binDir)) {
@@ -467,6 +515,10 @@ exec "$TARGET" "$@"
     } else {
         console.warn(`WARNING: Could not find local x64 Codex binary in ${CODEX_CLI_PATH}`);
     }
+
+    // The OpenAI source DMG is quarantined. The rebuilt bundle is unsigned,
+    // so clear inherited quarantine attributes to allow the user to open it.
+    run(`xattr -cr "${targetApp}"`);
 
     // 8. Fix Timestamps
     console.log("Fixing app timestamps...");
