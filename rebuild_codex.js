@@ -3,6 +3,21 @@ const path = require('path');
 const { execSync, execFileSync } = require('child_process');
 const os = require('os');
 
+// Current releases require OpenAI's Owl runtime. Preserve the signed Intel
+// distribution instead of replacing it with stock Electron.
+if (!process.argv.includes('--legacy-electron')) {
+    const args = [path.join(__dirname, 'scripts/update-native-codex.py'),
+        '--prepare-only', '--output', path.join(__dirname, 'Codex_Intel.app')];
+    if (process.argv.includes('--dry-run')) args.push('--dry-run');
+    const archiveIndex = process.argv.indexOf('--archive');
+    if (archiveIndex !== -1) {
+        if (!process.argv[archiveIndex + 1]) throw new Error('--archive requires a path');
+        args.push('--archive', process.argv[archiveIndex + 1]);
+    }
+    const result = require('child_process').spawnSync('/usr/bin/python3', args, { stdio: 'inherit' });
+    process.exit(result.status ?? 1);
+}
+
 // Configuration
 const REPO_ROOT = __dirname;
 const MOUNT_POINT = '/Volumes/CodexMount';
@@ -419,11 +434,19 @@ exec "$DIR/Codex.orig" --no-sandbox "$@"
         fs.copyFileSync(sourceCodexBin, targetCodexBin);
         fs.chmodSync(targetCodexBin, '755');
 
+        // Current macOS builds resolve the CLI inside a nested app bundle.
+        // Keep the root binaries for older app releases and share them through
+        // relative links so both layouts work after moving the app.
+        const cliMacOsDir = path.join(targetResources, 'codex-cli', 'CodexCLI.app', 'Contents', 'MacOS');
+        fs.mkdirSync(cliMacOsDir, { recursive: true });
+        fs.symlinkSync('../../../../codex', path.join(cliMacOsDir, 'codex'));
+
         const codeModeHost = path.join(path.dirname(sourceCodexBin), 'codex-code-mode-host');
         if (fs.existsSync(codeModeHost)) {
             const targetCodeModeHost = path.join(targetResources, 'codex-code-mode-host');
             fs.copyFileSync(codeModeHost, targetCodeModeHost);
             fs.chmodSync(targetCodeModeHost, '755');
+            fs.symlinkSync('../../../../codex-code-mode-host', path.join(cliMacOsDir, 'codex-code-mode-host'));
         }
 
         const binDir = path.join(targetResources, 'bin');
